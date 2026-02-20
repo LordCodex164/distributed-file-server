@@ -17,25 +17,32 @@ type TcpPeer struct {
 	wg       *sync.WaitGroup
 }
 
+type TCPTransportOpts struct {
+	ShakeHands     HandshakeFunc
+	Decoder        Decoder
+	Listen_address string
+	OnPeer         func(Peer) error
+}
+
 type TcpTransport struct {
-	listen_address string
 	listener net.Listener
 	rpcCh    chan RPC
 	mu       sync.Mutex
-	shakeHands HandshakeFunc
+	TCPTransportOpts
 }
 
-func NewTcpTransport(listenAddr string) *TcpTransport {
+func NewTcpTransport(opts TCPTransportOpts) *TcpTransport {
 	return &TcpTransport{
-		listen_address: listenAddr,
+		TCPTransportOpts: opts,
+		rpcCh:            make(chan RPC),
 	}
 }
 
 func NewTcpPeer(conn net.Conn, outbound bool) *TcpPeer {
 	return &TcpPeer{
-		Conn: conn,
+		Conn:     conn,
 		outbound: outbound,
-		wg: &sync.WaitGroup{},
+		wg:       &sync.WaitGroup{},
 	}
 }
 
@@ -48,34 +55,77 @@ func (p *TcpPeer) Send(b []byte) error {
 	return err
 }
 
+func (p *TCPTransportOpts) Addr() string {
+	return p.Listen_address
+}
+
+func (t *TcpTransport) Consume() <-chan RPC {
+	return t.rpcCh
+}
+
 func (t *TcpTransport) ListenAndAccept() error {
 	var err error
 
-	t.listener, err = net.Listen("tcp", t.listen_address)
+	t.listener, err = net.Listen("tcp", t.Listen_address)
 
 	if err != nil {
 		return err
 	}
 	fmt.Println("listener", t.listener)
 	go t.acceptHandShakeLoop()
-	log.Printf("TCP transport listening on port: %s\n", t.listen_address)
+	log.Printf("TCP transport listening on port: %s\n", t.Listen_address)
 	return nil
 }
 
 func (t *TcpTransport) acceptHandShakeLoop() {
-	conn, err := t.listener.Accept()
-	if(err != nil){
-		return
+
+	for {
+		conn, err := t.listener.Accept()
+		if err != nil {
+			fmt.Println("tcp accept error:", err, conn)
+			return
+		}
+		//handle connections
+		go t.handleConn(conn, false)
 	}
-	//handle 
-	go t.handleConn(conn, false)
+
 }
 
+type Temp struct{}
+
 func (t *TcpTransport) handleConn(conn net.Conn, outbound bool) {
+
+	var err error
+
 	peer := NewTcpPeer(conn, outbound)
 
-	if err := t.shakeHands(peer); err != nil {
-		return 
+	if err = t.ShakeHands(peer); err != nil {
+		conn.Close()
+		fmt.Println("tcp handshake error:", err)
+		return
 	}
 	fmt.Println("handling transport connection", conn)
+
+	if t.OnPeer != nil {
+		fmt.Println("onpeer exists", conn)
+		if err := t.OnPeer(peer); err != nil {
+			fmt.Println("connection close", conn)
+			peer.Close()
+			return
+		}
+	}
+
+	msg := RPC{}
+
+	//the encoding of the rpc between two peers
+	for {
+		err = t.Decoder.Decode(conn, &msg)
+		if err != nil {
+			fmt.Println("err", err)
+			return
+		}
+		msg.From = conn.RemoteAddr().String()
+		//write to the channel
+		t.rpcCh <- msg
+	}
 }
