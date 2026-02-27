@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -63,15 +64,23 @@ func (t *TcpTransport) Consume() <-chan RPC {
 	return t.rpcCh
 }
 
+func (t *TcpTransport) Dial(addr string) error {
+	conn, err := net.Dial("tcp", addr)
+	fmt.Println("conn", conn, addr)
+	if err != nil {
+		return err
+	}
+	go t.handleConn(conn, true)
+	return nil
+}
+
 func (t *TcpTransport) ListenAndAccept() error {
 	var err error
 
 	t.listener, err = net.Listen("tcp", t.Listen_address)
-
 	if err != nil {
 		return err
 	}
-	fmt.Println("listener", t.listener)
 	go t.acceptHandShakeLoop()
 	log.Printf("TCP transport listening on port: %s\n", t.Listen_address)
 	return nil
@@ -81,9 +90,11 @@ func (t *TcpTransport) acceptHandShakeLoop() {
 
 	for {
 		conn, err := t.listener.Accept()
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
 		if err != nil {
 			fmt.Println("tcp accept error:", err, conn)
-			return
 		}
 		//handle connections
 		go t.handleConn(conn, false)
@@ -107,7 +118,6 @@ func (t *TcpTransport) handleConn(conn net.Conn, outbound bool) {
 	fmt.Println("handling transport connection", conn)
 
 	if t.OnPeer != nil {
-		fmt.Println("onpeer exists", conn)
 		if err := t.OnPeer(peer); err != nil {
 			fmt.Println("connection close", conn)
 			peer.Close()
@@ -128,4 +138,8 @@ func (t *TcpTransport) handleConn(conn net.Conn, outbound bool) {
 		//write to the channel
 		t.rpcCh <- msg
 	}
+}
+
+func (t *TcpTransport) Close() error {
+	return t.listener.Close()
 }
